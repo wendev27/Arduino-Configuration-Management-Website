@@ -1,0 +1,43 @@
+import { useRef, useState } from 'react';
+import { MockSerial } from '../lib/mockSerial';
+
+export function useSerial() {
+  const [logs, setLogs] = useState<string[]>([]);
+  const [isConnected, setIsConnected] = useState(false);
+
+  const serialRef = useRef<MockSerial | null>(null);
+
+  const connect = () => {
+    const serial = new MockSerial();
+
+    serial.start((data) => {
+      setLogs((prev) => [...prev, data]);
+    });
+
+    serialRef.current = serial;
+    setIsConnected(true);
+  };
+
+  const disconnect = () => {
+    serialRef.current?.stop();
+    setIsConnected(false);
+  };
+
+  const sendCommand = (cmd: string) => {
+    if (!serialRef.current) return;
+
+    setLogs((prev) => [...prev, `> ${cmd}\n`]);
+
+    serialRef.current.send(cmd, (response) => {
+      setLogs((prev) => [...prev, response]);
+    });
+  };
+
+  return {
+    logs,
+    isConnected,
+    connect,
+    disconnect,
+    sendCommand,
+  };
+}
