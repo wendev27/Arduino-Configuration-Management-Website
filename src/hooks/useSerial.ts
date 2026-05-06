@@ -13,6 +13,38 @@ const MAX_LOG_LINES = 100;
 const SENSOR_UPDATE_DELAY_MS = 500;
 const USE_REAL = true;
 
+/** Firmware may prefix lines (e.g. `BADING ... ":DATA:{...}`); find marker anywhere. */
+function parseDataPayload(line: string): { waterLevel: number | null; interval: number | null } | null {
+  const marker = 'DATA:';
+  const idx = line.indexOf(marker);
+  if (idx === -1) return null;
+  const after = line.slice(idx + marker.length);
+  const start = after.indexOf('{');
+  const end = after.lastIndexOf('}');
+  if (start === -1 || end === -1 || end < start) return null;
+  try {
+    const parsed = JSON.parse(after.slice(start, end + 1)) as Record<string, unknown>;
+    return {
+      waterLevel: typeof parsed.waterLevel === 'number' ? parsed.waterLevel : null,
+      interval: typeof parsed.interval === 'number' ? parsed.interval : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function parseMacFromLine(line: string): string | null {
+  const marker = 'MAC:';
+  const idx = line.indexOf(marker);
+  if (idx === -1) return null;
+  const tail = line
+    .slice(idx + marker.length)
+    .trim()
+    .replace(/^["']/u, '');
+  const m = tail.match(/^(([0-9A-Fa-f]{2})(?::[0-9A-Fa-f]{2}){4,})/);
+  return m?.[1] ?? null;
+}
+
 export function useSerial() {
   const [logs, setLogs] = useState<string[]>([]);
   const [isConnected, setIsConnected] = useState(false);
@@ -168,24 +200,18 @@ export function useSerial() {
       const cleaned = line.trim();
       if (!cleaned) return;
 
-      if (cleaned.startsWith('DATA:')) {
-        const payload = cleaned.slice(5);
-        try {
-          const parsed = JSON.parse(payload);
-          scheduleSensorDataUpdate({
-            waterLevel:
-              typeof parsed.waterLevel === 'number' ? parsed.waterLevel : null,
-            interval:
-              typeof parsed.interval === 'number' ? parsed.interval : null,
-          });
-        } catch (error) {
-          pushLog(`[WARN] Failed to parse DATA payload: ${payload}`);
-        }
-      } else if (cleaned.startsWith('MAC:')) {
-        const mac = cleaned.slice(4).trim();
+      const sensor = parseDataPayload(cleaned);
+      if (sensor) {
+        scheduleSensorDataUpdate(sensor);
+      }
+
+      const mac = parseMacFromLine(cleaned);
+      if (mac) {
         setMacAddress(mac);
         registerMacAddress(mac);
-      } else if (cleaned === 'ESP32_READY') {
+      }
+
+      if (cleaned.includes('ESP32_READY')) {
         setDeviceReady(true);
       }
 
@@ -208,6 +234,9 @@ export function useSerial() {
     setConnectionError(null);
     setIsConnecting(true);
     setDeviceReady(false);
+    bufferRef.current = '';
+    pendingSensorDataRef.current = null;
+    lastSensorUpdateRef.current = 0;
 
     if (!isSupported) {
       setConnectionError(
@@ -228,14 +257,38 @@ export function useSerial() {
     }
 
     // Add a small delay to ensure cleanup is complete
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    await new Promise((resolve) => setTimeout(resolve, 200));
 
     try {
+      // Always create a fresh serial instance to avoid port state issues
       const serial: SerialConnection = USE_REAL
         ? new RealSerial()
         : new MockSerial();
 
-      await serial.connect(handleSerialChunk);
+      await serial.connect(handleSerialChunk, {
+        onDeviceLost: () => {
+          if (!isMountedRef.current) return;
+
+          if (sensorUpdateTimeoutRef.current) {
+            window.clearTimeout(sensorUpdateTimeoutRef.current);
+            sensorUpdateTimeoutRef.current = null;
+          }
+
+          serialRef.current = null;
+          setIsConnected(false);
+          setDeviceReady(false);
+          setMacAddress('');
+          setSensorData({ waterLevel: null, interval: null });
+          registeredMacRef.current = null;
+
+          pushLog(
+            '[Serial] Device lost — USB unplug, cable glitch, or reset after flashing. Click Connect.'
+          );
+          setConnectionError(
+            'Serial device disconnected. If you just uploaded new firmware, connect again.'
+          );
+        },
+      });
       serialRef.current = serial;
       setIsConnected(true);
       pushLog('Connected to ESP32.');

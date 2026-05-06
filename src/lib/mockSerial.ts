@@ -1,10 +1,13 @@
-import { SerialConnection } from './serial';
+import { SerialConnection, SerialConnectOptions } from './serial';
 
 export class MockSerial implements SerialConnection {
   interval: NodeJS.Timeout | null = null;
   callback: ((data: string) => void) | null = null;
 
-  async connect(callback: (data: string) => void) {
+  async connect(
+    callback: (data: string) => void,
+    _options?: SerialConnectOptions
+  ) {
     this.callback = callback;
     callback('ESP32_READY');
     callback('MAC:DE:AD:BE:EF:00');
