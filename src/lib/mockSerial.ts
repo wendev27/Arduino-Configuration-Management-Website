@@ -10,7 +10,7 @@ export class MockSerial implements SerialConnection {
   ) {
     this.callback = callback;
     callback('ESP32_READY');
-    callback('MAC:DE:AD:BE:EF:00');
+    callback('MAC:DE:AD:BE:EF:CA:FE');
 
     this.interval = setInterval(() => {
       const waterLevel = Math.floor(Math.random() * 100);

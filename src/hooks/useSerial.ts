@@ -33,16 +33,49 @@ function parseDataPayload(line: string): { waterLevel: number | null; interval: 
   }
 }
 
+/** Accepts Arduino `WiFi.macAddress()` (colons/hyphens) or compact 12-hex forms; trims junk after MAC. */
 function parseMacFromLine(line: string): string | null {
   const marker = 'MAC:';
   const idx = line.indexOf(marker);
   if (idx === -1) return null;
-  const tail = line
-    .slice(idx + marker.length)
-    .trim()
-    .replace(/^["']/u, '');
-  const m = tail.match(/^(([0-9A-Fa-f]{2})(?::[0-9A-Fa-f]{2}){4,})/);
-  return m?.[1] ?? null;
+
+  let tail = line.slice(idx + marker.length).trim().replace(/^["']/u, '');
+  tail = tail.split(/[^\dA-Fa-f:-]/)[0]?.trim() ?? '';
+
+  const hexDigits = tail.replace(/[^0-9A-Fa-f]/gi, '');
+  if (/^[0-9A-Fa-f]{12}$/i.test(hexDigits)) {
+    if (/^0{12}$/i.test(hexDigits)) return null;
+    return hexDigits
+      .toLowerCase()
+      .match(/../g)!
+      .join(':');
+  }
+
+  const delimited =
+    tail.match(/^([0-9A-Fa-f]{2})(?::[0-9A-Fa-f]{2}|-[0-9A-Fa-f]{2}){5}\b/i)?.[0] ??
+    tail.match(/^([0-9A-Fa-f]{2})(?::[0-9A-Fa-f]{2}|-[0-9A-Fa-f]{2}){4,}\b/i)?.[0];
+
+  if (!delimited) return null;
+
+  const fromDelim = delimited.replace(/-/g, ':').replace(/[^0-9A-Fa-f]/gi, '');
+  if (fromDelim.length !== 12 || /^0{12}$/i.test(fromDelim)) return null;
+
+  return fromDelim
+    .toLowerCase()
+    .match(/../g)!
+    .join(':');
+}
+
+/** STA MAC reads as all zeros until WiFi.stack is minimally initialized — see Arduino `WiFi.mode(WIFI_STA)`. */
+function lineHasUnsetMacZeros(line: string): boolean {
+  const marker = 'MAC:';
+  const idx = line.indexOf(marker);
+  if (idx === -1) return false;
+
+  let tail = line.slice(idx + marker.length).trim().replace(/^["']/u, '');
+  tail = tail.split(/[^\dA-Fa-f:-]/)[0]?.trim() ?? '';
+  const hexDigits = tail.replace(/[^0-9A-Fa-f]/gi, '');
+  return /^0{12}$/i.test(hexDigits);
 }
 
 export function useSerial() {
@@ -69,6 +102,7 @@ export function useSerial() {
   const pendingSensorDataRef = useRef<SensorData | null>(null);
   const sensorUpdateTimeoutRef = useRef<number | null>(null);
   const registeredMacRef = useRef<string | null>(null);
+  const zeroMacHintPostedRef = useRef(false);
   const isMountedRef = useRef(false);
 
   useEffect(() => {
@@ -209,6 +243,11 @@ export function useSerial() {
       if (mac) {
         setMacAddress(mac);
         registerMacAddress(mac);
+      } else if (lineHasUnsetMacZeros(cleaned) && !zeroMacHintPostedRef.current) {
+        zeroMacHintPostedRef.current = true;
+        pushLog(
+          '[Hint] MAC is all zeros until Wi-Fi STA is initialized. Before printing MAC call: WiFi.mode(WIFI_STA);'
+        );
       }
 
       if (cleaned.includes('ESP32_READY')) {
@@ -237,6 +276,7 @@ export function useSerial() {
     bufferRef.current = '';
     pendingSensorDataRef.current = null;
     lastSensorUpdateRef.current = 0;
+    zeroMacHintPostedRef.current = false;
 
     if (!isSupported) {
       setConnectionError(
@@ -280,6 +320,7 @@ export function useSerial() {
           setMacAddress('');
           setSensorData({ waterLevel: null, interval: null });
           registeredMacRef.current = null;
+          zeroMacHintPostedRef.current = false;
 
           pushLog(
             '[Serial] Device lost — USB unplug, cable glitch, or reset after flashing. Click Connect.'
@@ -292,6 +333,14 @@ export function useSerial() {
       serialRef.current = serial;
       setIsConnected(true);
       pushLog('Connected to ESP32.');
+
+      /* Boot lines often miss the reconnect window — ask sketches that handle GET_INFO. */
+      if (USE_REAL) {
+        window.setTimeout(() => {
+          if (!isMountedRef.current || serialRef.current !== serial) return;
+          void serial.send('GET_INFO');
+        }, 400);
+      }
     } catch (err: any) {
       console.error('Connection error:', err);
 
@@ -336,6 +385,7 @@ export function useSerial() {
       setMacAddress('');
       setSensorData({ waterLevel: null, interval: null });
       registeredMacRef.current = null;
+      zeroMacHintPostedRef.current = false;
       setConnectionError(null);
     }
   };
